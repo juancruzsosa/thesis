@@ -40,3 +40,14 @@ def rowise_cosine_sim(a, b):
     norm_b = norm(b, axis=1)
     #print(norm_a.shape)
     return dot / (norm_a * norm_b)
+def _get_sim(model):
+    def fn(row):
+        try:
+            return model.wv.similarity(row.word_a, row.word_b)
+        except KeyError:
+            return float('nan')
+    return fn
+
+def evaluate_model(model, df):
+    df = df.assign(sim=df.apply(_get_sim(model), axis=1)).dropna(subset=['sim'])
+    return df[['rank', 'sim']].corr(method='spearman').loc['rank', 'sim']
