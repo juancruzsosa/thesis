@@ -85,19 +85,17 @@ class HyperParamLogger(CallbackAny2Vec):
 class CentroidCalculation(CallbackAny2Vec):
     """ Calculates the centroid and the average/std distances to the centroid
     """
-    def __init__(self):
+    def __init__(self, context=False):
+        self.context = context
         self._centroids = []
         self._dist_means = []
         self._dist_stds = []
 
-    @staticmethod
-    def get_centroid(model):
-        return model.wv.vectors.mean(axis=0)
-
-    @staticmethod
-    def get_distances(centroid, model):
-        return norm(model.wv.vectors-centroid, axis=1)
-        #return distance.mean(), distance.std()
+    def embedding(self, model):
+        if self.context:
+            return model.syn1neg
+        else:
+            return model.wv.vectors
 
     @property
     def centroids(self):
@@ -116,9 +114,9 @@ class CentroidCalculation(CallbackAny2Vec):
         return self._dist_stds[-1]
 
     def on_epoch_end(self, model):
-        centroid = self.get_centroid(model)
+        centroid = self.embedding(model).mean(axis=0)
         self._centroids.append(centroid)
-        distances = self.get_distances(centroid, model)
+        distances = norm(self.embedding(model)-centroid, axis=1)
         self._dist_means.append(distances.mean())
         self._dist_stds.append(distances.std())
 
