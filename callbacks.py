@@ -82,6 +82,7 @@ class HyperParamLogger(CallbackAny2Vec):
     def params_hist(self):
         return self._params_hist
 
+
 class CentroidCalculation(CallbackAny2Vec):
     """ Calculates the centroid and the average/std distances to the centroid
     """
@@ -113,11 +114,58 @@ class CentroidCalculation(CallbackAny2Vec):
     def dist_std(self):
         return self._dist_stds[-1]
 
+    @staticmethod
+    def _get_centroid_distances(embedding):
+        centroid = embedding.mean(axis=0)
+        distances = norm(embedding-centroid, axis=1)
+        return centroid, distances  
+
     def on_epoch_end(self, model):
-        centroid = self.embedding(model).mean(axis=0)
+        embedding = self.embedding(model)
+        centroid, distances = self._get_centroid_distances(embedding)
         self._centroids.append(centroid)
-        distances = norm(self.embedding(model)-centroid, axis=1)
         self._dist_means.append(distances.mean())
         self._dist_stds.append(distances.std())
 
     on_train_begin = on_epoch_end
+
+class CentroidCalculationByCategory(CentroidCalculation):
+    def __init__(self, indices_by_class, context=False):
+        self.context = context
+        self.indices_by_class = indices_by_class
+        self._centroids = []
+        self._dist_means = []
+        self._dist_stds = []
+
+    @property
+    def centroids(self):
+        return {category: np.stack([x[category] for x in self._centroids])
+                for category in self.indices_by_class}
+
+    def on_epoch_end(self, model):
+        embedding = self.embedding(model)
+        centroids_by_cat = {}
+        dist_means_by_cat = {}
+        dist_stds_by_cat = {}
+        for category, indices in self.indices_by_class.items():
+            embedding_cat = embedding[indices]
+            centroid, distances = self._get_centroid_distances(embedding_cat)
+            centroids_by_cat[category] = centroid
+            dist_means_by_cat[category] = distances.mean()
+            dist_stds_by_cat[category] = distances.std()
+        self._centroids.append(centroids_by_cat)
+        self._dist_means.append(dist_means_by_cat)
+        self._dist_stds.append(dist_stds_by_cat)
+
+    @property
+    def dist_stds(self):
+        return {category: np.stack([x[category] for x in self._dist_stds])
+                for category in self.indices_by_class}
+
+    @property
+    def dist_means(self):
+        return {category: np.stack([x[category] for x in self._dist_means])
+                for category in self.indices_by_class}
+
+    on_train_begin = on_epoch_end
+
