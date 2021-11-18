@@ -40,6 +40,14 @@ def rowise_cosine_sim(a, b):
     norm_b = norm(b, axis=1)
     #print(norm_a.shape)
     return dot / (norm_a * norm_b)
+
+def pairwise_cosine_sim(a, b):
+    dot = np.matmul(a, b.transpose())
+    norm_a = norm(a, axis=1)
+    norm_b = norm(b, axis=1)
+    return dot/np.outer(norm_a, norm_b)
+
+
 def _get_sim(model):
     def fn(row):
         try:

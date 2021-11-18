@@ -91,6 +91,8 @@ class CentroidCalculation(CallbackAny2Vec):
         self._centroids = []
         self._dist_means = []
         self._dist_stds = []
+        self._norm_means = []
+        self._norm_stds = []
 
     def embedding(self, model):
         if self.context:
@@ -113,19 +115,30 @@ class CentroidCalculation(CallbackAny2Vec):
     @property
     def dist_std(self):
         return self._dist_stds[-1]
+    
+    @property
+    def norm_mean(self):
+        return self._norm_means[-1]
+    
+    @property
+    def norm_std(self):
+        return self._norm_stds[-1]
 
     @staticmethod
     def _get_centroid_distances(embedding):
         centroid = embedding.mean(axis=0)
+        norms = norm(embedding, axis=1)
         distances = norm(embedding-centroid, axis=1)
-        return centroid, distances  
+        return centroid, norms, distances  
 
     def on_epoch_end(self, model):
         embedding = self.embedding(model)
-        centroid, distances = self._get_centroid_distances(embedding)
+        centroid, norms, distances = self._get_centroid_distances(embedding)
         self._centroids.append(centroid)
         self._dist_means.append(distances.mean())
         self._dist_stds.append(distances.std())
+        self._norm_means.append(norms.mean())
+        self._norm_stds.append(norms.std())
 
     on_train_begin = on_epoch_end
 
@@ -136,6 +149,8 @@ class CentroidCalculationByCategory(CentroidCalculation):
         self._centroids = []
         self._dist_means = []
         self._dist_stds = []
+        self._norm_means = []
+        self._norm_stds = []
 
     @property
     def centroids(self):
@@ -147,15 +162,21 @@ class CentroidCalculationByCategory(CentroidCalculation):
         centroids_by_cat = {}
         dist_means_by_cat = {}
         dist_stds_by_cat = {}
+        norm_means_by_cat = {}
+        norm_stds_by_cat = {}
         for category, indices in self.indices_by_class.items():
             embedding_cat = embedding[indices]
-            centroid, distances = self._get_centroid_distances(embedding_cat)
+            centroid, norms, distances = self._get_centroid_distances(embedding_cat)
             centroids_by_cat[category] = centroid
             dist_means_by_cat[category] = distances.mean()
             dist_stds_by_cat[category] = distances.std()
+            norm_means_by_cat[category] = norms.mean()
+            norm_stds_by_cat[category] = norms.std()
         self._centroids.append(centroids_by_cat)
         self._dist_means.append(dist_means_by_cat)
         self._dist_stds.append(dist_stds_by_cat)
+        self._norm_means.append(norm_means_by_cat)
+        self._norm_stds.append(norm_stds_by_cat)
 
     @property
     def dist_stds(self):
@@ -165,6 +186,16 @@ class CentroidCalculationByCategory(CentroidCalculation):
     @property
     def dist_means(self):
         return {category: np.stack([x[category] for x in self._dist_means])
+                for category in self.indices_by_class}
+    
+    @property
+    def norm_means(self):
+        return {category: np.stack([x[category] for x in self._norm_means])
+                for category in self.indices_by_class}
+    
+    @property
+    def norm_stds(self):
+        return {category: np.stack([x[category] for x in self._norm_stds])
                 for category in self.indices_by_class}
 
     on_train_begin = on_epoch_end
