@@ -5,6 +5,16 @@ from scipy.linalg import norm
 
 from gensim.models.callbacks import CallbackAny2Vec
 
+class IterCounter(CallbackAny2Vec):
+    def __init__(self):
+        self.iter = 0
+    
+    def on_train_begin(self, model):
+        self.iter = 0
+    
+    def on_epoch_end(self, model):
+        self.iter += 1
+
 
 class EpochLogger(CallbackAny2Vec):
     """ Displays a Progress bar during training
@@ -16,7 +26,7 @@ class EpochLogger(CallbackAny2Vec):
 
     def on_train_begin(self, model):
         self.epoch_tqdm = self.tqdm(total=model.epochs,
-                                    unit='epoch',
+                                    unit='iter',
                                     leave=True,
                                     position=0,
                                     ascii=False)

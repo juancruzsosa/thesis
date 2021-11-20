@@ -11,6 +11,25 @@ from nltk.tokenize import sent_tokenize
 from matplotlib import pyplot as plt
 
 
+class BatchedCorpus(object):
+    def __init__(self, sentences, batch_size, shuffle=True):
+        self.sentences = sentences
+        self.batch_size = batch_size
+        if shuffle:
+            self.indices = np.random.permutation(len(self.sentences))
+        else:
+            self.indices = np.arange(len(self.sentences))
+        self.curr_idx = 0
+        self.nr_chunks = int(ceil(len(self.sentences)/batch_size))
+        
+    def __iter__(self):
+        yield from (self.sentences[idx] for idx in self.indices[self.curr_idx * self.batch_size:(self.curr_idx+1) * self.batch_size])
+        self.curr_idx = (self.curr_idx + 1) % self.nr_chunks
+    
+    def __len__(self):
+        return self.batch_size
+    
+
 def load_sentences(path, sentencizer=sent_tokenize, min_words=2):
     path = Path(path)
     sentences_path = path.with_suffix('.sentences.pkl')
