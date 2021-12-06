@@ -1,5 +1,7 @@
 import pickle
 from pathlib import Path
+from functools import total_ordering
+
 
 import numpy as np
 
@@ -78,3 +80,34 @@ def _get_sim(model):
 def evaluate_model(model, df):
     df = df.assign(sim=df.apply(_get_sim(model), axis=1)).dropna(subset=['sim'])
     return df[['rank', 'sim']].corr(method='spearman').loc['rank', 'sim']
+
+def format_big_number(x):
+    if x >= 1e9:
+        return f'{round(x/1e9)}B'
+    elif x >= 1e6:
+        return f'{round(x/1e6)}M'
+    elif x >= 1e3:
+        return f'{round(x/1e3)}K'
+    else:
+        return f'{round(x)}'
+
+@total_ordering
+class BigNum(object):
+    def __init__(self, number, prefix=''):
+        self.prefix = prefix
+        self.number = number
+
+    def __eq__(self, other):
+        return self.number == other.number
+
+    def __lt__(self, other):
+        return self.number < other.number
+
+    def __str__(self):
+        return self.prefix + format_big_number(self.number)
+
+    def __repr__(self):
+        return str(self)
+
+    def __hash__(self):
+        return hash((self.prefix, self.number))
