@@ -1,8 +1,9 @@
 import pickle
 from pathlib import Path
 from functools import total_ordering
+from itertools import groupby
 
-
+import pandas as pd
 import numpy as np
 
 from scipy.linalg import norm
@@ -111,3 +112,12 @@ class BigNum(object):
 
     def __hash__(self):
         return hash((self.prefix, self.number))
+
+def word_coverage(v1, v2):
+    v1 = set(v1)
+    v2 = set(v2)
+    return v2-v1, v2
+
+def show_word_table(vs):
+    s = groupby(sorted(list(vs)), key=lambda x: x[0])
+    return pd.DataFrame.from_dict({c: list(ss) for c, ss in s}, orient='index').fillna('').transpose()
