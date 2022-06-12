@@ -82,27 +82,62 @@ def evaluate_model(model, df):
     df = df.assign(sim=df.apply(_get_sim(model), axis=1)).dropna(subset=['sim'])
     return df[['rank', 'sim']].corr(method='spearman').loc['rank', 'sim']
 
+scales = {
+    'B': 1e9,
+    'M': 1e6,
+    'K': 1e3,
+    '': 1e0
+}
+
 def format_big_number(x):
-    if x >= 1e9:
-        return f'{round(x/1e9)}B'
-    elif x >= 1e6:
-        return f'{round(x/1e6)}M'
-    elif x >= 1e3:
-        return f'{round(x/1e3)}K'
+    if x >= scales['B']:
+        scale_unit = 'B'
+    elif x >= scales['M']:
+        scale_unit = 'M'
+    elif x >= scales['K']:
+        scale_unit = 'K'
     else:
-        return f'{round(x)}'
+        scale_unit = ''
+    return f'{round(x/scales[scale_unit])}{scale_unit}'
+
+import re
+
 
 @total_ordering
 class BigNum(object):
+    re_bignum = re.compile(r'^(?P<prefix>.*\D)(?P<number>\d+)(?P<scale_unit>[bmk])?$', re.IGNORECASE)
+
+    @classmethod
+    def parse(cls, s: str):
+        m = cls.re_bignum.match(s)
+        if m is None:
+            raise ValueError(f'{s} is not a valid big number')
+        number = int(m.group('number'))
+        scale_unit = (m.group('scale_unit') or '').upper()
+        prefix = m.group('prefix')
+        number = number * scales[scale_unit]
+        return cls(number, prefix)
+        
     def __init__(self, number, prefix=''):
         self.prefix = prefix
         self.number = number
 
     def __eq__(self, other):
-        return self.number == other.number
+        if isinstance(other, (int, float, BigNum)):
+            return self.number == float(other)
+        else:
+            return False
+    
+    def __float__(self):
+        return float(self.number)
 
     def __lt__(self, other):
-        return self.number < other.number
+        if isinstance(other, (int, float, BigNum)):
+            return self.number < float(other)
+        elif isinstance(other, str):
+            return self.prefix < other
+        else:
+            raise TypeError(f'{other} is not a valid comparison target')
 
     def __str__(self):
         return self.prefix + format_big_number(self.number)
@@ -111,7 +146,8 @@ class BigNum(object):
         return str(self)
 
     def __hash__(self):
-        return hash((self.prefix, self.number))
+        return hash(self.number)
+
 
 def word_coverage(v1, v2):
     v1 = set(v1)
