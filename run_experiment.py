@@ -36,6 +36,8 @@ class TrainerArgs:
     eval_root: Path
     model_root: Path
     model_name: str
+    low: int
+    high: int
     dataset: str = 'enwik6_clean'
     epochs: int = 100
     alpha: float = 0.025

@@ -103,23 +103,17 @@ def evaluate_model(model, df):
     df = df.assign(sim=df.apply(_get_sim(model), axis=1)).dropna(subset=['sim'])
     return df[['rank', 'sim']].corr(method='spearman').loc['rank', 'sim']
 
-scales = {
-    'B': 1e9,
-    'M': 1e6,
-    'K': 1e3,
-    '': 1e0
-}
+scales = OrderedDict([
+    ('B', 1e9),
+    ('M', 1e6),
+    ('K', 1e3),
+])
 
-def format_big_number(x):
-    if x >= scales['B']:
-        scale_unit = 'B'
-    elif x >= scales['M']:
-        scale_unit = 'M'
-    elif x >= scales['K']:
-        scale_unit = 'K'
-    else:
-        scale_unit = ''
-    return f'{round(x/scales[scale_unit])}{scale_unit}'
+def format_big_number(x, scales: OrderedDict[str, int]=scales):
+    for scale_unit, number in scales.items():
+        if x >= number:
+            return f'{round(x/scales[scale_unit])}{scale_unit}'
+    return f'{round(x)}'
 
 import re
 
@@ -134,9 +128,13 @@ class BigNum(object):
         if m is None:
             raise ValueError(f'{s} is not a valid big number')
         number = int(m.group('number'))
-        scale_unit = (m.group('scale_unit') or '').upper()
+        if m.group('scale_unit') is not None:
+            scale_unit = m.group('scale_unit').upper()
+        else:
+            scale_unit = None
         prefix = m.group('prefix')
-        number = number * scales[scale_unit]
+        scale = scales[scale_unit] if scale_unit else 1
+        number = number * scale
         return cls(number, prefix)
         
     def __init__(self, number, prefix=''):
