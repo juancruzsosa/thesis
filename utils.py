@@ -221,3 +221,17 @@ def dataset_stats(df_words):
                      'max_count': df_words.qty.max(),
                      'min_count': df_words.qty.min()})
     return agg
+
+from functools import partial
+def moving_average_2d(X, window_size=3, padding=True):
+    if padding:
+        X = np.concatenate([np.zeros((window_size-1,
+                                    X.shape[1])), X])
+    convolve = partial(np.convolve, v=np.ones(window_size,), mode='valid')
+    Y = np.apply_along_axis(func1d=convolve, axis=0, arr=X)
+    if padding:
+        div = np.concatenate([np.arange(1, window_size+1),
+                            np.ones(Y.shape[0]-window_size) * window_size])
+    else:
+        div = window_size
+    return Y/np.expand_dims(div, 1)
