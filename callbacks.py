@@ -1,10 +1,8 @@
 from pathlib import Path
-from math import log10, ceil
 
 import numpy as np
 
 from scipy.linalg import norm
-import gensim
 from gensim.models.callbacks import CallbackAny2Vec
 from utils import batched_word_analogy, rowise_distance, rowise_cosine_sim
 
