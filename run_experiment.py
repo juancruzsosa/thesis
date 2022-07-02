@@ -6,10 +6,9 @@ import logging
 import math
 import os
 import random
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
-from itertools import chain
 from multiprocessing import cpu_count
 from pathlib import Path
 
@@ -19,16 +18,15 @@ import numpy as np
 import pandas as pd
 from gensim.models import Word2Vec
 from pyparsing import Or
+from torch import t
 from tqdm.contrib.concurrent import process_map
 
 import callbacks
 import data
-from cluster import (add_cat_columns, make_cluster_by_freq,
-                     split_by_freq_by_min, split_by_freq_class,
-                     split_by_freq_class_pair)
+from cluster import ExponentialFrequencySpliter, LowMidHighFrecuencySplitter
 from transform import TextTransform
-from utils import (BatchedCorpus, dataset_stats, eval_silhouette_score,
-                   evaluate_model, format_big_number, load_sentences,
+from utils import (BatchedCorpus, eval_silhouette_score,
+                   evaluate_model, load_sentences,
                    word_coverage)
 
 
@@ -64,7 +62,9 @@ class TrainerArgs:
             'window_size': self.window_size,
             'negative_samples': self.negative_samples,
             'ns_exponent': self.ns_exponent,
-            'notebook': self.notebook
+            'notebook': self.notebook,
+            'low': self.low,
+            'high': self.high
         }
 
     @classmethod
@@ -75,14 +75,41 @@ class TrainerArgs:
 def average(x):
     return sum(x)/len(x)
 
-def average_listdicts(ls):
+def average_listdicts(ls, ignore=[]):
     res = []
     for ds in zip(*ls):
-        res.append({k: average([d[k] for d in ds]) for k in ds[0].keys()})
+        res.append({k: average([d[k] for d in ds if k in d]) if k not in ignore else ds[0][k] for k in ds[0].keys()})
     return res
 
 def average_lists(ls):
-    return np.mean(ls, axis=0).tolist()    
+    return np.mean(ls, axis=0).tolist()
+
+class Metric(object):
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+class SimMetric(Metric): 
+    def __call__(self, model) -> float:
+        return evaluate_model(model, self.dataset)
+    
+class SilouteMetric(Metric):
+    def __call__(self, model) -> float:
+        return eval_silhouette_score(model, self.dataset)
+    
+class WordAnalogyMetric(Metric):
+    def __init__(self, callback: callbacks.WordAnalogyCallback):
+        self.callback = callback
+    
+    def __call__(self, model) -> float:
+        return self.callback.acc
+    
+class WordAnalogyByCategoryMetric(Metric):
+    def __init__(self, callback: callbacks.WordAnalogyCallback, cat: str):
+        self.callback = callback
+        self.category = cat
+        
+    def __call__(self, model) -> float:
+        return self.callback.acc_by_partition[self.category]
 
 # Preprocesamiento y Tokenización
 ULTRA_HIGH_FREQ = 1_000
@@ -140,6 +167,14 @@ class Trainer(object):
     parser.add_argument('--model-name',
                         type=str,
                         help='Model name')
+    parser.add_argument('--low',
+                        type=int,
+                        help="Low frecuency threshold",
+                        required=True)
+    parser.add_argument('--high',
+                        type=int,
+                        help="High frecuency threshold",
+                        required=True)
     
     @classmethod
     def parse_cli(cls):
@@ -173,28 +208,17 @@ class Trainer(object):
         self.train_sentences = process_map(transform, sentences, max_workers=cpu_count(), chunksize=10000)
 
         # Armado del Vocabulario
-        counts = pd.Series(Counter(chain.from_iterable(self.train_sentences))).sort_values(ascending=False)
-        self.df_words = pd.DataFrame({'index': np.arange(len(counts)),
-                                      'qty': counts,
-                                      'proba': counts/counts.sum(),
-                                      'freq_class': 'other'})
+        self.df_words = data.get_df_words(self.train_sentences)
 
         # Definición de los Clusters
-        make_cluster_by_freq(self.df_words)
-
+        self.exp_splitter = ExponentialFrequencySpliter(self.df_words)
+        self.lmh_splitter = LowMidHighFrecuencySplitter(self.df_words,
+                                                        low=self.args.low,
+                                                        high=self.args.high)
         self.vocab = set(self.df_words.index)
 
         # with pd.option_context('display.float_format', 
-        df_stats = pd.concat([dataset_stats(self.df_words).rename('all').to_frame().transpose(),
-            self.df_words.groupby('freq_class').apply(dataset_stats)], axis=0)
-        df_stats_styled = df_stats.style.format({'uniq_words': format_big_number,
-                                            'total_words': format_big_number,
-                                            'proba_min': '{:0.0e}',
-                                            'proba_max': '{:0.0e}',
-                                            'proba_sum': '{:0.0%}',
-                                            'max_count': format_big_number,
-                                            'min_count': format_big_number})
-        self.logger.info(df_stats_styled)
+        self.logger.info(self.exp_splitter.stats())
 
         self.load_test_datasets()
         self.LOAD = (self.args.model_root/'train_config.json').exists()
@@ -286,34 +310,20 @@ class Trainer(object):
         #display.display(wa.head())
 
         self.logger.info("### Word-Analogy")
-        battig = data.load_battig(self.args.eval_root)
-        self.battig = battig
-
-        self.rw2 = add_cat_columns(self.rw, self.df_words)
-        self.ws2 = add_cat_columns(self.ws, self.df_words)
-        self.wa2 = add_cat_columns(self.wa, self.df_words)
-        self.men2 = add_cat_columns(self.men, self.df_words)
-        self.mturk2 = add_cat_columns(self.mturk, self.df_words)
-        self.simlex2 = add_cat_columns(self.simlex, self.df_words)
-        self.battig2 = add_cat_columns(self.battig, self.df_words)
-        #print(self.battig2.columns)
-
-        self.dfs_rw2 = split_by_freq_class_pair(self.rw2)
-        self.dfs_ws2 = split_by_freq_class_pair(self.ws2)
-        self.dfs_wa2 = split_by_freq_by_min(self.wa2)
-        self.dfs_men2 = split_by_freq_class_pair(self.men2)
-        self.dfs_mturk2 = split_by_freq_class_pair(self.mturk2)
-        self.dfs_simlex2 = split_by_freq_class_pair(self.simlex2)
-        self.dfs_battig2 = split_by_freq_class(self.battig2)
-        #print(self.dfs_battig2)
-
-        # Partition size
-        pd.concat([
-            pd.Series({k: len(v) for k, v in df.items()}).rename(name)
-            for df, name in [(self.dfs_rw2, 'Rare-Word'),
-                            (self.dfs_ws2, 'Word-Sim'),
-                            (self.dfs_wa2, 'Word-Analogy')]
-            ], axis=1).fillna(0).astype(int).sort_index()
+        self.battig  = data.load_altszyler(self.args.eval_root)
+        self.dfs = {}
+        
+        for splitter in [self.exp_splitter, self.lmh_splitter]:
+            self.dfs[splitter.name] = {
+                'rw': splitter.split_by_freq_class_pair(self.rw),
+                'ws': splitter.split_by_freq_class_pair(self.ws),
+                'wa': splitter.split_by_freq_by_min(self.wa),
+                'men': splitter.split_by_freq_class_pair(self.men),
+                'mturk': splitter.split_by_freq_class_pair(self.mturk),
+                'simlex': splitter.split_by_freq_class_pair(self.simlex),
+                'battig': splitter.split_by_freq_class(self.battig),
+            }
+        #print(self.dfs_battig)
 
     def preprocess_word_analogy_dataset(self, wa):
         wa = wa.applymap(lambda x: x.lower())
@@ -362,25 +372,46 @@ class Trainer(object):
                     ns_exponent=self.args.ns_exponent,
                     )
         self.w2v.build_vocab(self.train_sentences, update=False)
-        freq_cats = self.get_freq_cats()
-
-        def get_wa_cat_acc(_, cat):
-            return wa_accuracy.acc_by_partition[cat]
+        freq_exp_cats = self.exp_splitter.divide(self.w2v.wv.index_to_key)
+        freq_lmh_cats = self.lmh_splitter.divide(self.w2v.wv.index_to_key)
 
         iter_counter = callbacks.IterCounter()
         emb_centroid_callback = callbacks.CentroidCalculation(context=False)
         ctx_centroid_callback = callbacks.CentroidCalculation(context=True)
-        emb_centroid_by_freq_callback = callbacks.CentroidCalculationByCategory(freq_cats, context=False)
-        ctx_centroid_by_freq_callback = callbacks.CentroidCalculationByCategory(freq_cats, context=True)
-        wa_accuracy = callbacks.WordAnalogyCallback(self.wa, indices_by_class=self.dfs_wa2)
-
-        evaluate_fns_rw = OrderedDict(('rw_' + str(cat), partial(evaluate_model, df=df)) for cat, df in sorted(self.dfs_rw2.items(), key=lambda x: x[0]))
-        evaluate_fns_ws = OrderedDict(('ws_' + str(cat), partial(evaluate_model, df=df)) for cat, df in sorted(self.dfs_ws2.items(), key=lambda x: x[0]))
-        metrics_wa = OrderedDict(('wa_' + str(cat), partial(get_wa_cat_acc, cat=cat)) for cat in sorted(self.dfs_wa2.keys()))
-        evaluate_fns_men = OrderedDict(('men_' + str(cat), partial(evaluate_model, df=df)) for cat, df in sorted(self.dfs_men2.items(), key=lambda x: x[0]))
-        evaluate_fns_mturk = OrderedDict(('mturk_' + str(cat), partial(evaluate_model, df=df)) for cat, df in sorted(self.dfs_mturk2.items(), key=lambda x: x[0]))
-        evaluate_fns_simlex = OrderedDict(('simlex_' + str(cat), partial(evaluate_model, df=df)) for cat, df in sorted(self.dfs_simlex2.items(), key=lambda x: x[0]))
-        evaluate_fns_battig = OrderedDict(('battig_' + str(cat), partial(eval_silhouette_score, df=df)) for cat, df in sorted(self.dfs_battig2.items(), key=lambda x: x[0]))
+        emb_centroid_by_freq_callback_exp = callbacks.CentroidCalculationByCategory(freq_exp_cats, context=False)
+        emb_centroid_by_freq_callback_lmh = callbacks.CentroidCalculationByCategory(freq_lmh_cats, context=False)
+        ctx_centroid_by_freq_callback_exp = callbacks.CentroidCalculationByCategory(freq_exp_cats, context=True)
+        ctx_centroid_by_freq_callback_lmh = callbacks.CentroidCalculationByCategory(freq_lmh_cats, context=True)
+        wa_accuracy_exp = callbacks.WordAnalogyCallback(self.wa, indices_by_class=self.dfs['exp']['wa'])
+        wa_accuracy_lmh = callbacks.WordAnalogyCallback(self.wa, indices_by_class=self.dfs['lmh']['wa'])
+        
+        performance_metrics = OrderedDict(
+            corr_ws=SimMetric(self.ws),
+            corr_rw=SimMetric(self.rw),
+            corr_men=SimMetric(self.men),
+            corr_mturk=SimMetric(self.mturk),
+            corr_simlex=SimMetric(self.simlex),
+            score_battig=SilouteMetric(self.battig),
+            wa_acc=WordAnalogyMetric(wa_accuracy_exp)
+        )
+        for splitter in [self.exp_splitter, self.lmh_splitter]:
+            performance_metrics.update((splitter.name + '_rw_' + str(cat), SimMetric(df))
+                                       for cat, df in self.dfs[splitter.name]['rw'].items())
+            performance_metrics.update((splitter.name + '_ws_' + str(cat), SimMetric(df))
+                                       for cat, df in self.dfs[splitter.name]['ws'].items())
+            performance_metrics.update((splitter.name + '_men_' + str(cat), SimMetric(df))
+                                       for cat, df in self.dfs[splitter.name]['men'].items())
+            performance_metrics.update((splitter.name + '_mturk_' + str(cat), SimMetric(df))
+                                       for cat, df in self.dfs[splitter.name]['mturk'].items())
+            performance_metrics.update((splitter.name + '_simlex_' + str(cat), SimMetric(df))
+                                       for cat, df in self.dfs[splitter.name]['simlex'].items())
+            performance_metrics.update((splitter.name + '_battig_' + str(cat), SilouteMetric(df))
+                                       for cat, df in self.dfs[splitter.name]['battig'].items())
+        
+        performance_metrics.update(('exp_wa_' + str(cat), WordAnalogyByCategoryMetric(wa_accuracy_exp, cat=cat))
+                                    for cat in self.dfs['exp']['wa'].keys())
+        performance_metrics.update(('lmh_wa_' + str(cat), WordAnalogyByCategoryMetric(wa_accuracy_lmh, cat=cat))
+                                    for cat in self.dfs['lmh']['wa'].keys())
 
         loss_callback = callbacks.LossCallback()
         hparams_callback = callbacks.HyperParamLogger(
@@ -394,66 +425,63 @@ class Trainer(object):
             dist_emb_std=lambda _: emb_centroid_callback.dist_std,
             dist_ctx_mean=lambda _: ctx_centroid_callback.dist_mean,
             dist_ctx_std=lambda _: ctx_centroid_callback.dist_std,
-            corr_ws=lambda model: evaluate_model(model, self.ws),
-            corr_rw=lambda model: evaluate_model(model, self.rw),
-            corr_men=lambda model: evaluate_model(model, self.men),
-            corr_mturk=lambda model: evaluate_model(model, self.mturk),
-            corr_simlex=lambda model: evaluate_model(model, self.simlex),
-            score_battig=lambda model: eval_silhouette_score(model, self.battig),
-            wa_acc=lambda _: wa_accuracy.acc,
-            **evaluate_fns_rw,
-            **evaluate_fns_ws,
-            **evaluate_fns_men,
-            **evaluate_fns_simlex,
-            **evaluate_fns_mturk,
-            **evaluate_fns_battig,
-            **metrics_wa
+            **performance_metrics
         )
         self.callback_checkpoint = {
             'iter_counter': iter_counter,
             'emb_centroid_callback': emb_centroid_callback,
-            'emb_centroid_by_freq_callback': emb_centroid_by_freq_callback,
+            'emb_centroid_by_freq_callback_exp': emb_centroid_by_freq_callback_exp,
+            'emb_centroid_by_freq_callback_lmh': emb_centroid_by_freq_callback_lmh,
             'ctx_centroid_callback': ctx_centroid_callback,
-            'ctx_centroid_by_freq_callback': ctx_centroid_by_freq_callback,
+            'ctx_centroid_by_freq_callback_exp': ctx_centroid_by_freq_callback_exp,
+            'ctx_centroid_by_freq_callback_lmh': ctx_centroid_by_freq_callback_lmh,
             'loss_callback': loss_callback,
-            'wa_accuracy': wa_accuracy,
+            'wa_accuracy_exp': wa_accuracy_exp,
+            'wa_accuracy_lmh': wa_accuracy_lmh,
             'hparams_callback': hparams_callback
         }
-
-    def get_freq_cats(self):
-        idx2word = self.w2v.wv.index_to_key
-        freq_cats = {cat: []
-                for cat in self.df_words.freq_class.cat.categories}
-        for i, word in enumerate(idx2word):
-            freq_cats[self.df_words.freq_class.loc[word]].append(i)
-        freq_cats = {cat: np.array(indices) for cat, indices in freq_cats.items() if len(indices)>0}
-        return freq_cats
-
-    @property
-    def emb_centroid_by_freq_callback(self):
-        return self.callback_checkpoint['emb_centroid_by_freq_callback']
-    
-    @property
-    def ctx_centroid_by_freq_callback(self):
-        return self.callback_checkpoint['ctx_centroid_by_freq_callback']
-    
-    @property
-    def emb_centroid_callback(self):
-        return self.callback_checkpoint['emb_centroid_callback']
-
-    @property
-    def ctx_centroid_callback(self):
-        return self.callback_checkpoint['ctx_centroid_callback']
-    
-    @property
-    def hparams_callback(self):
-        return self.callback_checkpoint['hparams_callback']
     
     @property
     def params_hist(self):
         params_hist = pd.DataFrame.from_records(self.hparams_callback._params_hist)
         params_hist = params_hist.set_index('iter')
         return params_hist
+    
+    @property
+    def emb_centroid_callback(self):
+        return self.callback_checkpoint['emb_centroid_callback']
+    
+    @property
+    def emb_centroid_by_freq_callback_exp(self):
+        return self.callback_checkpoint['emb_centroid_by_freq_callback_exp']
+    
+    @property
+    def emb_centroid_by_freq_callback_lmh(self):
+        return self.callback_checkpoint['emb_centroid_by_freq_callback_lmh']
+    
+    @property
+    def ctx_centroid_callback(self):
+        return self.callback_checkpoint['ctx_centroid_callback']
+    
+    @property
+    def ctx_centroid_by_freq_callback_exp(self):
+        return self.callback_checkpoint['ctx_centroid_by_freq_callback_exp']
+    
+    @property
+    def ctx_centroid_by_freq_callback_lmh(self):
+        return self.callback_checkpoint['ctx_centroid_by_freq_callback_lmh']
+    
+    @property
+    def hparams_callback(self):
+        return self.callback_checkpoint['hparams_callback']
+    
+    @property
+    def freq_cats(self):
+        return list(self.exp_splitter.categories)
+    
+    @property
+    def lmh_cats(self):
+        return list(self.lmh_splitter.categories)
 
     @classmethod
     def average(self, trainers):
@@ -461,31 +489,36 @@ class Trainer(object):
                 for config_path in trainers
         ]
         trainer = trainers[0]
-        trainer.emb_centroid_by_freq_callback._centroids = average_listdicts([t.emb_centroid_by_freq_callback._centroids for t in trainers])
-        trainer.ctx_centroid_by_freq_callback._centroids = average_listdicts([t.ctx_centroid_by_freq_callback._centroids for t in trainers])
-        trainer.emb_centroid_by_freq_callback._norm_means = average_listdicts([t.emb_centroid_by_freq_callback._norm_means for t in trainers])
-        trainer.emb_centroid_by_freq_callback._norm_stds = average_listdicts([t.emb_centroid_by_freq_callback._norm_stds for t in trainers])
-        trainer.emb_centroid_by_freq_callback._dist_means = average_listdicts([t.emb_centroid_by_freq_callback._norm_means for t in trainers])
-        trainer.emb_centroid_by_freq_callback._dist_means = average_listdicts([t.emb_centroid_by_freq_callback._norm_stds for t in trainers])
-        trainer.ctx_centroid_by_freq_callback._norm_means = average_listdicts([t.ctx_centroid_by_freq_callback._norm_means for t in trainers])
-        trainer.ctx_centroid_by_freq_callback._norm_stds = average_listdicts([t.ctx_centroid_by_freq_callback._norm_stds for t in trainers])
-        trainer.ctx_centroid_by_freq_callback._dist_means = average_listdicts([t.ctx_centroid_by_freq_callback._norm_means for t in trainers])
-        trainer.ctx_centroid_by_freq_callback._dist_stds = average_listdicts([t.ctx_centroid_by_freq_callback._norm_stds for t in trainers])
-        trainer.emb_centroid_callback._norm_means = average_lists([t.emb_centroid_callback._norm_means for t in trainers])
-        trainer.emb_centroid_callback._norm_stds = average_lists([t.emb_centroid_callback._norm_stds for t in trainers])
+        for callback in ['emb_centroid_callback',
+                         'emb_centroid_by_freq_callback_exp',
+                         'emb_centroid_by_freq_callback_lmh',
+                         'ctx_centroid_callback',
+                         'ctx_centroid_by_freq_callback_exp',
+                         'ctx_centroid_by_freq_callback_lmh']:
+            if isinstance(trainer.callback_checkpoint[callback], callbacks.CentroidCalculationByCategory):
+                combine = average_listdicts
+            else:
+                combine = average_lists
+            print(type(trainer.callback_checkpoint[callback]))
+            trainer.callback_checkpoint[callback]._centroids = combine([t.callback_checkpoint[callback]._centroids for t in trainers])
+            trainer.callback_checkpoint[callback]._norm_means = combine([t.callback_checkpoint[callback]._norm_means for t in trainers])
+            trainer.callback_checkpoint[callback]._norm_stds = combine([t.callback_checkpoint[callback]._norm_stds for t in trainers])
+            trainer.callback_checkpoint[callback]._dist_means = combine([t.callback_checkpoint[callback]._dist_means for t in trainers])
+            trainer.callback_checkpoint[callback]._dist_stds = combine([t.callback_checkpoint[callback]._dist_stds for t in trainers])
+        trainer.callback_checkpoint['hparams_callback']._params_hist = average_listdicts([t.callback_checkpoint['hparams_callback']._params_hist for t in trainers], ignore=['epoch', 'iter'])
         return trainer
 
     def dataset_counts(self):
         def part_size(d):
             return {k: len(v) for k, v in sorted(d.items())}
         stats = pd.DataFrame({
-            'rw': part_size(self.dfs_rw2),
-            'ws': part_size(self.dfs_ws2),
-            'wa': part_size(self.dfs_wa2),
-            'men': part_size(self.dfs_men2),
-            'mturk': part_size(self.dfs_mturk2),
-            'simlex': part_size(self.dfs_simlex2),
-            'battig': part_size(self.dfs_battig2),
+            'rw': part_size(self.dfs_rw),
+            'ws': part_size(self.dfs_ws),
+            'wa': part_size(self.dfs_wa),
+            'men': part_size(self.dfs_men),
+            'mturk': part_size(self.dfs_mturk),
+            'simlex': part_size(self.dfs_simlex),
+            'battig': part_size(self.dfs_battig),
         })
         stats = stats.fillna(0)
         return stats.astype(int)

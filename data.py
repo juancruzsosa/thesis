@@ -1,4 +1,16 @@
+from typing import List
+import numpy as np
 import pandas as pd
+from collections import Counter
+from itertools import chain
+
+def get_df_words(sentences: List[List[str]]):
+    words = chain.from_iterable(sentences)
+    counts = Counter(words)
+    counts = pd.Series(counts).sort_values(ascending=False)
+    return pd.DataFrame({'index': np.arange(len(counts)),
+                         'qty': counts,
+                         'proba': counts/counts.sum()})
 
 def load_ws(ds_root):
     """Load Word-Sim dataset
